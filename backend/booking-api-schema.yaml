@@ -1,0 +1,48 @@
+# booking-api-schema.yaml
+openapi: 3.0.0
+info:
+  title: Room Booking API
+  version: 1.0.0
+servers:
+  - url: https://your-domain.com  # Your deployed service URL
+paths:
+  /book-room:
+    post:
+      summary: Book a meeting room on Industrious
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date:
+                  type: string
+                  description: Date in YYYY-MM-DD format
+                time:
+                  type: string
+                  description: Start time in HH:MM format
+                duration:
+                  type: integer
+                  description: Duration in minutes
+                attendees:
+                  type: integer
+                  description: Number of attendees
+              required:
+                - date
+                - time
+                - duration
+      responses:
+        200:
+          description: Booking result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  room_details:
+                    type: object

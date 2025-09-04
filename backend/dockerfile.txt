@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    # Set a default port (override at run time)
+    PORT=8000
+
+# Install security & build essentials, then clean up
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user
+RUN useradd -m -u 10001 appuser
+
+WORKDIR /app
+
+# Install Python deps first to leverage Docker layer caching
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application source
+COPY app.py booking-api-schema.yaml ./
+
+# Use non-root user from here on
+USER appuser
+
+# Expose the port (informational)
+EXPOSE ${PORT}
+
+# Optional healthcheck (expects /health to return 200 if you have one)
+# HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+#   CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
+
+# ---- RUNTIME COMMANDS ----
+# If your app is a plain Python script:
+CMD ["tini", "--", "python", "app.py"]
+
+# If you're using FastAPI and uvicorn is in requirements.txt, replace CMD with:
+# CMD ["tini", "--", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# If you're using Flask and gunicorn is in requirements.txt, replace CMD with:
+# CMD ["tini", "--", "gunicorn", "--bind", "0.0.0.0:8000", "app:app", "--workers", "2", "--threads", "4"]
