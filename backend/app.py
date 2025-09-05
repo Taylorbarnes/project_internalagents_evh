@@ -8,6 +8,7 @@ import jwt
 import time
 from collections import defaultdict
 import threading
+from openai import OpenAI
 
 app = Flask(__name__)
 ALLOWED_ORIGINS = os.getenv('ALLOWED_ORIGINS', '*')
@@ -165,8 +166,30 @@ def chat():
                 "error": "Missing 'message'"
             }), 400
 
-        # For now, return a deterministic, safe echo to validate connectivity.
-        reply = f"You said: {message}"
+        # Use OpenAI for a basic chat completion
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not openai_api_key:
+            # Fallback to echo if no key configured
+            reply = f"You said: {message}"
+            return jsonify({
+                "success": True,
+                "response": reply,
+                "agentId": agent_id,
+                "conversationId": conversation_id
+            })
+
+        client = OpenAI(api_key=openai_api_key)
+        system_prompt = "You are a concise and helpful assistant for booking and general questions."
+        completion = client.chat.completions.create(
+            model=os.getenv('OPENAI_MODEL', 'gpt-4o-mini'),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message},
+            ],
+            temperature=0.3,
+            max_tokens=300,
+        )
+        reply = completion.choices[0].message.content.strip()
 
         return jsonify({
             "success": True,
