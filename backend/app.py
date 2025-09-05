@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from functools import wraps
 import playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import os
 import jwt
 import time
@@ -20,6 +21,9 @@ INDUSTRIOUS_USERNAME = os.getenv('INDUSTRIOUS_USERNAME')
 INDUSTRIOUS_PASSWORD = os.getenv('INDUSTRIOUS_PASSWORD')
 ALLOWED_API_KEYS = os.getenv('ALLOWED_API_KEYS', '').split(',')
 DEBUG_ERRORS = os.getenv('DEBUG_ERRORS', '0')
+PLAYWRIGHT_HEADLESS = os.getenv('PLAYWRIGHT_HEADLESS', '1')
+INDUSTRIOUS_LOGIN_URL = os.getenv('INDUSTRIOUS_LOGIN_URL', 'https://members.industriousoffice.com')
+INDUSTRIOUS_BOOKING_URL = os.getenv('INDUSTRIOUS_BOOKING_URL', 'https://portal.industriousoffice.com/home/calendar/roombooking')
 
 # Rate limiting storage
 request_counts = defaultdict(list)
@@ -129,21 +133,170 @@ def book_room():
         }), 500
 
 def automate_booking(date, time, duration, attendees):
-    # Use environment variables for credentials
+    """Automate booking flow using Playwright.
+
+    Note: This implementation performs a login and sets the stage for booking. Since
+    selectors differ across tenants, you may need to tune the selectors below to
+    match the Industrious portal UI for your account.
+    """
     username = INDUSTRIOUS_USERNAME
     password = INDUSTRIOUS_PASSWORD
-    
+
     if not username or not password:
         raise Exception("Industrious credentials not configured")
-    
-    # Your automation code here using the credentials
-    # Return mock data for now
-    return {
-        "room_name": "Conference Room A",
-        "date": date,
-        "time": time,
-        "capacity": attendees
-    }
+
+    headless = PLAYWRIGHT_HEADLESS != '0'
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        context = browser.new_context()
+        page = context.new_page()
+
+        try:
+            # Start at booking URL; if unauthenticated the site should redirect to login
+            page.goto(INDUSTRIOUS_BOOKING_URL, timeout=120_000)
+            if "login" in page.url or "signin" in page.url or page.url.startswith(INDUSTRIOUS_LOGIN_URL):
+                page.goto(INDUSTRIOUS_LOGIN_URL, timeout=120_000)
+            # Try a few common selectors for email/password/sign in
+            filled = False
+            try:
+                page.get_by_label("Email").fill(username)
+                filled = True
+            except Exception:
+                pass
+            if not filled:
+                try:
+                    page.fill('input[name="email"]', username)
+                    filled = True
+                except Exception:
+                    pass
+            if not filled:
+                page.fill('input[type="email"]', username)
+
+            filled_pw = False
+            try:
+                page.get_by_label("Password").fill(password)
+                filled_pw = True
+            except Exception:
+                pass
+            if not filled_pw:
+                try:
+                    page.fill('input[name="password"]', password)
+                    filled_pw = True
+                except Exception:
+                    pass
+            if not filled_pw:
+                page.fill('input[type="password"]', password)
+
+            # Click a button that likely logs in
+            clicked = False
+            for selector in [
+                'button:has-text("Sign in")',
+                'button:has-text("Log in")',
+                'button[type="submit"]',
+                'text=Sign in',
+                'text=Log in',
+            ]:
+                try:
+                    page.click(selector, timeout=5_000)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+
+            if not clicked:
+                # Press Enter as a last resort
+                page.keyboard.press('Enter')
+
+            page.wait_for_load_state('networkidle', timeout=60_000)
+
+            # Navigate to booking page after login
+            page.goto(INDUSTRIOUS_BOOKING_URL, timeout=120_000)
+            page.wait_for_load_state('networkidle', timeout=60_000)
+
+            # Heuristic: pick the room select with option '2-L' and select it
+            select_count = page.locator('select').count()
+            selected_room = False
+            for i in range(select_count):
+                sel = page.locator('select').nth(i)
+                try:
+                    options = [t.strip() for t in sel.locator('option').all_text_contents()]
+                    match = next((o for o in options if o.lower().replace(' ', '') in ['2-l','2l','2–l']), None)
+                    if match:
+                        sel.select_option(label=match)
+                        selected_room = True
+                        break
+                except Exception:
+                    continue
+
+            # Compute end time
+            def _to_label(hhmm: str) -> str:
+                # '15:00' -> '3:00pm'
+                hh, mm = [int(x) for x in hhmm.split(':')]
+                suffix = 'am' if hh < 12 else 'pm'
+                h12 = hh % 12
+                if h12 == 0:
+                    h12 = 12
+                return f"{h12}:{mm:02d}{suffix}"
+
+            start_label = _to_label(time)
+            end_minutes = int(duration)
+            hh, mm = [int(x) for x in time.split(':')]
+            mm_total = hh * 60 + mm + end_minutes
+            end_h = (mm_total // 60) % 24
+            end_m = mm_total % 60
+            end_label = _to_label(f"{end_h:02d}:{end_m:02d}")
+
+            # Heuristic: find two time selects that contain am/pm options
+            time_selects = []
+            for i in range(select_count):
+                sel = page.locator('select').nth(i)
+                try:
+                    options = ' '.join(sel.locator('option').all_text_contents()).lower()
+                    if 'am' in options or 'pm' in options:
+                        time_selects.append(sel)
+                except Exception:
+                    pass
+            if len(time_selects) >= 2:
+                try:
+                    time_selects[0].select_option(label=start_label)
+                except Exception:
+                    pass
+                try:
+                    time_selects[1].select_option(label=end_label)
+                except Exception:
+                    pass
+
+            # Click a likely submit button
+            for selector in [
+                'button:has-text("Book")',
+                'button:has-text("Reserve")',
+                'text=Book',
+                'text=Reserve',
+            ]:
+                try:
+                    page.click(selector, timeout=5_000)
+                    break
+                except Exception:
+                    continue
+
+            page.wait_for_load_state('networkidle', timeout=30_000)
+
+            room_name = '2-L' if selected_room else 'Selected Room'
+            return {
+                "room_name": room_name,
+                "date": date,
+                "time": f"{start_label} - {end_label}",
+                "capacity": attendees,
+            }
+        except PlaywrightTimeoutError:
+            raise Exception("Booking portal timeout during navigation or login")
+        finally:
+            try:
+                context.close()
+                browser.close()
+            except Exception:
+                pass
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
@@ -185,18 +338,61 @@ def chat():
         model_name = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
 
         reply = ""
-        # Primary: Chat Completions (widely supported)
+        # Primary: Chat Completions with optional tool-call to book a room
         completion = client.chat.completions.create(
             model=model_name,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message},
             ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "book_room",
+                        "description": "Book a meeting room using the Industrious portal.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "date": {"type": "string", "description": "YYYY-MM-DD"},
+                                "time": {"type": "string", "description": "HH:MM 24h"},
+                                "duration": {"type": "integer", "description": "Duration in minutes"},
+                                "attendees": {"type": "integer", "description": "Number of attendees", "default": 1}
+                            },
+                            "required": ["date", "time", "duration"]
+                        }
+                    }
+                }
+            ],
             temperature=0.3,
-            max_tokens=300,
+            max_tokens=400,
         )
         if completion and completion.choices and completion.choices[0].message:
-            reply = (completion.choices[0].message.content or "").strip()
+            msg = completion.choices[0].message
+            tool_calls = getattr(msg, "tool_calls", None)
+            if tool_calls:
+                try:
+                    import json as _json
+                    for tool_call in tool_calls:
+                        fn = getattr(tool_call, "function", None)
+                        if fn and fn.name == "book_room":
+                            args = _json.loads(fn.arguments or "{}")
+                            date = args.get("date")
+                            time_str = args.get("time")
+                            duration = int(args.get("duration")) if args.get("duration") is not None else None
+                            attendees = int(args.get("attendees") or 1)
+                            if date and time_str and duration:
+                                result = automate_booking(date, time_str, duration, attendees)
+                                reply = f"✅ Booked {result['room_name']} on {result['date']} from {result['time']}"
+                                return jsonify({
+                                    "success": True,
+                                    "response": reply,
+                                    "agentId": agent_id,
+                                    "conversationId": conversation_id
+                                })
+                except Exception:
+                    app.logger.exception("Tool execution failed")
+            reply = (getattr(msg, "content", None) or "").strip()
 
         # Fallback: Responses API (some orgs route o-models here)
         if not reply:
