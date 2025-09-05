@@ -180,8 +180,12 @@ def chat():
 
         client = OpenAI(api_key=openai_api_key)
         system_prompt = "You are a concise and helpful assistant for booking and general questions."
+        model_name = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+
+        reply = ""
+        # Primary: Chat Completions (widely supported)
         completion = client.chat.completions.create(
-            model=os.getenv('OPENAI_MODEL', 'gpt-4o-mini'),
+            model=model_name,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message},
@@ -189,7 +193,26 @@ def chat():
             temperature=0.3,
             max_tokens=300,
         )
-        reply = completion.choices[0].message.content.strip()
+        if completion and completion.choices and completion.choices[0].message:
+            reply = (completion.choices[0].message.content or "").strip()
+
+        # Fallback: Responses API (some orgs route o-models here)
+        if not reply:
+            resp = client.responses.create(
+                model=model_name,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": message},
+                ],
+            )
+            try:
+                # SDK provides output_text convenience for plain text
+                reply = (getattr(resp, "output_text", None) or "").strip()
+            except Exception:
+                reply = reply or ""
+
+        if not reply:
+            reply = "I’m here and connected, but I couldn’t generate a response just now. Please try again."
 
         return jsonify({
             "success": True,
