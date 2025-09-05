@@ -22,14 +22,27 @@ export class ChatController {
       const loadingMessage = this.model.addLoadingMessage()
       this.notifyUpdate()
 
-      // Generate agent response (mock API call)
-      const response = await this.model.generateResponse()
+      // Call server-side chat route
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: content.trim(),
+          agentId: this.model.getCurrentAgent().id,
+        }),
+      })
 
       // Remove loading indicator
       this.model.removeLoadingMessage(loadingMessage.id)
 
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      const reply = (data && (data.response || data.data?.response)) || "Sorry, I couldn't respond."
+
       // Add agent response
-      this.model.addMessage(response, "agent")
+      this.model.addMessage(String(reply), "agent")
       this.notifyUpdate()
     } catch (error) {
       console.error("Error sending message:", error)

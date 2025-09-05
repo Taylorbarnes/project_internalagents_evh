@@ -148,6 +148,38 @@ def automate_booking(date, time, duration, attendees):
 def health_check():
     return jsonify({"status": "healthy", "timestamp": time.time()})
 
+# Simple chat endpoint for conversational responses
+@app.route('/chat', methods=['POST'])
+@require_auth
+@rate_limit(max_requests=60, window_minutes=60)  # basic protection
+def chat():
+    try:
+        data = request.get_json(silent=True) or {}
+        message = (data.get('message') or '').strip()
+        agent_id = data.get('agentId') or 'default'
+        conversation_id = data.get('conversationId') or str(int(time.time()))
+
+        if not message:
+            return jsonify({
+                "success": False,
+                "error": "Missing 'message'"
+            }), 400
+
+        # For now, return a deterministic, safe echo to validate connectivity.
+        reply = f"You said: {message}"
+
+        return jsonify({
+            "success": True,
+            "response": reply,
+            "agentId": agent_id,
+            "conversationId": conversation_id
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": "Chat processing failed"
+        }), 500
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
