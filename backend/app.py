@@ -19,6 +19,7 @@ API_SECRET_KEY = os.getenv('API_SECRET_KEY')  # For JWT
 INDUSTRIOUS_USERNAME = os.getenv('INDUSTRIOUS_USERNAME')
 INDUSTRIOUS_PASSWORD = os.getenv('INDUSTRIOUS_PASSWORD')
 ALLOWED_API_KEYS = os.getenv('ALLOWED_API_KEYS', '').split(',')
+DEBUG_ERRORS = os.getenv('DEBUG_ERRORS', '0')
 
 # Rate limiting storage
 request_counts = defaultdict(list)
@@ -169,6 +170,7 @@ def chat():
         # Use OpenAI for a basic chat completion
         openai_api_key = os.getenv('OPENAI_API_KEY')
         if not openai_api_key:
+            app.logger.warning("/chat called without OPENAI_API_KEY; responding with echo fallback")
             # Fallback to echo if no key configured
             reply = f"You said: {message}"
             return jsonify({
@@ -221,10 +223,16 @@ def chat():
             "conversationId": conversation_id
         })
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": "Chat processing failed"
-        }), 500
+        # Log full stack to Render logs
+        try:
+            app.logger.exception("Chat processing failed")
+        except Exception:
+            pass
+
+        error_body = {"success": False, "error": "Chat processing failed"}
+        if DEBUG_ERRORS == '1':
+            error_body["detail"] = str(e)
+        return jsonify(error_body), 500
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
